@@ -1,0 +1,24 @@
+web-scan/
+├── data/
+│   ├── keywords.json
+│   ├── websites.json
+│   ├── yt_channels.json
+│   ├── yt_videos.json
+│   ├── academy_articles.json
+├── input/
+│   ├── academy_articles_import.csv
+├── output/
+│   ├── webscrape_results.csv
+│   ├── youtube_Channel_comments_(Channel ID)
+│   ├── youtube_comments_(video ID)
+├── tools/
+│   ├── __init__.py
+│   ├── academy_search.py
+│   ├── google_search.py
+│   ├── reddit_search.py
+│   ├── youtube_search.py
+├── config.example.py
+├── requirements.txt
+├── tree.txt
+├── main.py
+└── README.md
