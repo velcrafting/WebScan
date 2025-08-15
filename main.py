@@ -7,43 +7,7 @@ import time
 # Ensure tools directory is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "tools"))
 
-from tools import cli, google_search, llm_probe, index_tracker, scheduler, storage, reddit_search, sentiment, themes
-
-# ---------------------------------------------------------------------------
-# GEO / SERP utilities
-# ---------------------------------------------------------------------------
-def run_geo_serp_reddit(queries_file: str, top: int):
-    queries = storage.load_json(queries_file, [])
-    all_results = []
-    for q in queries:
-        results = google_search.search_google(q)
-        reddit_hits = [r for r in results if "reddit.com" in r.get("url", "")] \
-            [:top]
-        for hit in reddit_hits:
-            hit["query"] = q
-            all_results.append(hit)
-    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
-    out_path = os.path.join('output', f'serp_reddit_{ts}.json')
-    storage.write_json(out_path, all_results)
-    print(f"Saved {len(all_results)} result(s) to {out_path}")
-
-def run_geo_llm_probe(queries_file: str):
-    queries = storage.load_json(queries_file, [])
-    all_results = []
-    for q in queries:
-        all_results.extend(llm_probe.probe(q))
-    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
-    out_path = os.path.join('output', f'llm_probe_{ts}.json')
-    storage.write_json(out_path, all_results)
-    print(f"Saved {len(all_results)} probe result(s) to {out_path}")
-
-def run_geo_index_check():
-    stats = index_tracker.check_indexing()
-    if stats:
-        print("Indexing stats:", stats)
-    else:
-        print("No recent indexed posts found.")
-
+from tools import cli, scheduler, storage, reddit_search, sentiment, themes, geo, seo
 # ---------------------------------------------------------------------------
 # Engagement utilities
 # ---------------------------------------------------------------------------
@@ -91,8 +55,10 @@ def run_eng_fud_scan(subs_file: str, lookback: int, limit: int, rules_file: str)
     start_ts = int(time.time()) - lookback * 24 * 3600
     results = []
     for sub in subreddits:
-        df = reddit_search.scrape_reddit(reddit, keywords=[], limit=limit, subreddit=sub, start_ts=start_ts,
-                                         highlight_terms=None, fetch_comments=False)
+        df = reddit_search.scrape_reddit(
+            reddit, keywords=[], limit=limit, subreddit=sub, start_ts=start_ts,
+            highlight_terms=None, fetch_comments=False
+        )
         for row in df.to_dict('records'):
             text = f"{row.get('title', '')} {row.get('content', '')}"
             tone = sentiment.tone_from_text(text)
@@ -126,6 +92,10 @@ def parse_args():
 
     sub.add_parser('geo:index-check', help='Check Google indexing for tracked Reddit posts')
 
+    sp_meta = sub.add_parser('seo:serp-metadata', help='Fetch metadata from top search results')
+    sp_meta.add_argument('--queries', required=True, help='Path to queries JSON file')
+    sp_meta.add_argument('--top', type=int, default=5, help='Top N results to analyze')
+
     sp_brand = sub.add_parser('eng:brand-activity', help='Collect recent activity for brand accounts')
     sp_brand.add_argument('--users', required=True, help='Path to reddit usernames JSON file')
     sp_brand.add_argument('--lookback', type=int, default=60, help='Lookback window in days')
@@ -148,11 +118,20 @@ def main():
         return
 
     if args.command == 'geo:serp-reddit':
-        run_geo_serp_reddit(args.queries, args.top)
+        out_path, count = geo.serp_reddit(args.queries, args.top)
+        print(f"Saved {count} result(s) to {out_path}")
     elif args.command == 'geo:llm-probe':
-        run_geo_llm_probe(args.queries)
+        out_path, count = geo.llm_probe_queries(args.queries)
+        print(f"Saved {count} probe result(s) to {out_path}")
     elif args.command == 'geo:index-check':
-        run_geo_index_check()
+        stats = geo.index_check()
+        if stats:
+            print("Indexing stats:", stats)
+        else:
+            print("No recent indexed posts found.")
+    elif args.command == 'seo:serp-metadata':
+        out_path, count = seo.serp_metadata(args.queries, args.top)
+        print(f"Saved metadata for {count} result(s) to {out_path}")
     elif args.command == 'eng:brand-activity':
         run_eng_brand_activity(args.users, args.lookback)
     elif args.command == 'eng:fud-scan':
