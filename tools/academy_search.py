@@ -1,25 +1,22 @@
 import os
-import json
 import csv
-import requests
+import json
 import time
+import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
-
-# =======================
-# CONFIGURATION
-# =======================
-SCRAPE_DELAY = 5.0
+from random import uniform
 
 # =======================
 # FILE PATHS
 # =======================
 DATA_DIR = "data"
 OUTPUT_DIR = "output"
-INPUT_DIR = "input"  # Folder for raw CSV input
+INPUT_DIR = "input"
 
-ARTICLES_FILE = os.path.join(DATA_DIR, "academy_articles.json")
 CSV_IMPORT_FILE = os.path.join(INPUT_DIR, "academy_articles_import.csv")
+ARTICLES_FILE = os.path.join(DATA_DIR, "academy_articles.json")
+LOG_FILE = os.path.join(OUTPUT_DIR, "academy_scrape_log.txt")
 
 # Ensure necessary directories exist
 for directory in [DATA_DIR, OUTPUT_DIR, INPUT_DIR]:
@@ -27,334 +24,169 @@ for directory in [DATA_DIR, OUTPUT_DIR, INPUT_DIR]:
         os.makedirs(directory)
 
 # =======================
-# LANGUAGE REGION CODES
+# KEYWORDS TO SEARCH
 # =======================
-LANGUAGES = {
-    "English (en)": "en",
-    "Arabic (ar)": "ar",
-    "Chinese Simplified (zh-hans)": "zh-hans",
-    "French (fr)": "fr",
-    "German (de)": "de",
-    "Russian (ru)": "ru",
-    "Spanish (es)": "es",
-    "Portuguese (pt-br)": "pt-br",
-    "Turkish (tr)": "tr",
-    "Japanese (ja)": "ja",
-    "Korean (ko)": "ko",
-}
-
-BASE_URL = "https://www.ledger.com/academy"
+KEYWORDS = ["Device", "Hardware Wallet", "Cold Storage Wallet", "Ledger Live", "Bolos OS", "Partner", "Provider", "swap provider", "swap partner", "Crypto Wallet", "Ledger Wallet"]
 
 # =======================
-# HELPER FUNCTIONS
+# SMART RATE LIMITING
 # =======================
-def load_json(filepath):
-    try:
-        with open(filepath, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
-
-def save_json(data, filepath):
-    with open(filepath, "w") as f:
-        json.dump(data, f, indent=4)
-
-def clean_url(url):
-    url = url.strip()
-    if url.startswith("https://www.ledger.comhttps://"):
-        url = url.replace("https://www.ledger.comhttps://", "https://www.ledger.com/")
-    return url
-
-def get_soup(url):
-    url = clean_url(url)
-    print(f"DEBUG: Fetching URL: {url}")
+def fetch_page(url, retries=3):
+    session = requests.Session()
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/114.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
+        )
     }
-    try:
-        response = requests.get(url, headers=headers)
-        time.sleep(SCRAPE_DELAY)
-    except Exception as e:
-        print(f"❌ Error during requests.get: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            print(f"🌐 Fetching: {url}")
+            response = session.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                return BeautifulSoup(response.text, "html.parser")
+            elif response.status_code == 429:
+                wait_time = 2 ** attempt + uniform(1, 3)
+                print(f"⚠️ Rate limited. Retrying in {wait_time:.2f} seconds...")
+                time.sleep(wait_time)
+        except Exception as e:
+            print(f"❌ Error fetching {url}: {e}")
+    print(f"❌ Failed to retrieve page after {retries} attempts.")
+    log_failure(url, "Failed to fetch page")
+    return None
 
-    if response.status_code != 200:
-        print(f"❌ Received status code {response.status_code} for URL: {url}")
-        return None
-    return BeautifulSoup(response.text, "html.parser")
+# =======================
+# LOGGING FUNCTION
+# =======================
+def log_failure(url, reason):
+    """ Log failures to an output file for future inspection. """
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{datetime.now()} - {url} - {reason}\n")
 
-def scrape_article(url):
-    """Scrape article details from the given URL."""
-    url = clean_url(url)
-    if not url.startswith("http"):
-        url = f"https://www.ledger.com{url}"
-        url = clean_url(url)
-    soup = get_soup(url)
+# =======================
+# OFFLINE SYNC: CSV → JSON
+# =======================
+def load_and_sync_articles():
+    """ Load academy_articles.json and merge with CSV data if available. """
+    print("🔍 Loading existing academy articles...")
+    
+    # Load JSON data
+    existing_articles = []
+    if os.path.exists(ARTICLES_FILE):
+        with open(ARTICLES_FILE, "r") as f:
+            existing_articles = json.load(f)
+
+    existing_links = {article.get("link") for article in existing_articles}
+    
+    # Load CSV data if it exists
+    if os.path.exists(CSV_IMPORT_FILE):
+        print("📥 Merging data from academy_articles_import.csv...")
+        with open(CSV_IMPORT_FILE, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                link = row.get("Link", "").strip()
+                if link and link not in existing_links:
+                    new_article = {
+                        "link": link,
+                        "title": row.get("Article", "Unknown Title").strip(),
+                        "category": row.get("Category", "Unknown Category").strip(),
+                        "publish_date": row.get("Publish Date", "Unknown Date").strip(),
+                        "update_date": row.get("Update Date", "Unknown Date").strip(),
+                        "type": row.get("Type", "Unknown Type").strip(),
+                        "translations": {},
+                        "Keywords": {}
+                    }
+                    existing_articles.append(new_article)
+                    existing_links.add(link)
+    
+    # Save back to JSON
+    with open(ARTICLES_FILE, "w") as f:
+        json.dump(existing_articles, f, indent=4)
+    
+    print(f"✅ Merged articles saved to {ARTICLES_FILE}")
+    return existing_articles
+
+# =======================
+# SCRAPE AND UPDATE ARTICLE
+# =======================
+def scrape_article(article):
+    """ Scrapes the page for keywords and updates the article details. """
+    url = article["link"]
+    soup = fetch_page(url)
     if not soup:
-        print(f"❌ Failed to retrieve article: {url}")
+        print(f"❌ Failed to scrape article: {url}")
+        log_failure(url, "Scrape failed (no soup object)")
         return None
 
-    title = soup.find("h1").text.strip() if soup.find("h1") else "Unknown Title"
-    article_div = soup.find(id="article")
+    # Title extraction if not present
+    if not article.get("title") or article["title"] == "Unknown Title":
+        article["title"] = soup.find("h1").text.strip() if soup.find("h1") else "Unknown Title"
+        if article["title"] == "Unknown Title":
+            log_failure(url, "Title not found on page")
+
+    # Description (first 3 paragraphs)
     description = ""
+    article_div = soup.find(id="article")
     if article_div:
         paragraphs = article_div.find_all("p")
         description = " ".join(p.text.strip() for p in paragraphs[:3])
-    dates = soup.find_all("time")
-    publish_date = dates[0].text.strip() if len(dates) > 0 else "Unknown"
-    last_edit_date = dates[1].text.strip() if len(dates) > 1 else publish_date
+    
+    article["description"] = description
+    
+    # Keyword counting
+    text = soup.get_text().lower()
+    article["Keywords"] = {keyword: text.count(keyword.lower()) for keyword in KEYWORDS}
+    return article
 
-    return {
-        "title": title,
-        "description": description,
-        "publish_date": publish_date,
-        "last_edit_date": last_edit_date,
-        "link": url,
-    }
-
-def discover_articles():
-    """Discover article URLs from the Ledger Academy main page."""
-    soup = get_soup(BASE_URL)
-    if not soup:
-        print("❌ Failed to retrieve Academy page.")
-        return []
-    articles_set = set()
-    for link in soup.find_all("a", href=True):
-        href = link["href"].strip()
-        if "/academy/topics/" in href:
-            if href.startswith("http"):
-                full_url = href
-            else:
-                full_url = f"https://www.ledger.com{href}"
-            full_url = clean_url(full_url)
-            articles_set.add(full_url)
-    # Preserve order
-    return list(dict.fromkeys(articles_set))
-
-def check_translation_exists(url):
-    """
-    Check if a translated page exists by first sending a HEAD request and,
-    if successful, performing a GET request to verify expected content.
-    In this example, we check for the presence of an <h1> tag.
-    """
-    try:
-        head_resp = requests.head(url, timeout=10)
-        if head_resp.status_code != 200:
-            return False
-
-        # Lightweight GET to confirm valid page content.
-        get_resp = requests.get(url, timeout=10)
-        if "<h1" in get_resp.text:
-            return True
-        return False
-
-    except Exception as e:
-        print(f"❌ Error checking translation for {url}: {e}")
-        return False
-
-def check_translations(base_url):
-    """
-    Loop through all language codes and check if the translated page exists.
-    Returns a dictionary with "Y" if the translation exists, else "N".
-    """
-    results = {}
-    for lang, code in LANGUAGES.items():
-        # Construct the translated URL by inserting the language code.
-        translated_url = base_url.replace("/academy/", f"/{code}/academy/")
-        results[lang] = "Y" if check_translation_exists(translated_url) else "N"
-    return results
-
-def save_to_csv(data):
-    """Export the article data (including translation status) to a CSV file."""
+# =======================
+# SAVE RESULTS TO CSV (Including URL)
+# =======================
+def save_to_csv(articles):
+    """Export the article data to a CSV file, including URL."""
     date_str = datetime.now().strftime("%m%d%y")
     filename = os.path.join(OUTPUT_DIR, f"ledger_academy_articles_{date_str}.csv")
-    headers = [
-        "Title", "Description", "Publish Date", "Last Edit",
-        "Category", "Type", "English (en)"
-    ] + list(list(LANGUAGES.keys())[1:])
+    
+    headers = ["URL", "Title", "Description", "Publish Date", "Last Edit", "Category", "Type"] + KEYWORDS
+    
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
-        for entry in data:
+        for article in articles:
             row = {
-                "Title": entry.get("title", ""),
-                "Description": entry.get("description", ""),
-                "Publish Date": entry.get("publish_date", ""),
-                "Last Edit": entry.get("last_edit_date", ""),
-                "Category": entry.get("category", ""),
-                "Type": entry.get("type", ""),
-                "English (en)": "Y" if entry.get("link") else "N",
+                "URL": article.get("link", ""),
+                "Title": article.get("title", ""),
+                "Description": article.get("description", ""),
+                "Publish Date": article.get("publish_date", ""),
+                "Last Edit": article.get("update_date", ""),
+                "Category": article.get("category", ""),
+                "Type": article.get("type", "")
             }
-            translations = entry.get("translations", {})
-            for lang in list(LANGUAGES.keys())[1:]:
-                row[lang] = translations.get(lang, "N")
+            for keyword in KEYWORDS:
+                row[keyword] = article["Keywords"].get(keyword, 0)
             writer.writerow(row)
+
     print(f"✅ Data saved to {filename}")
-
-def import_article_sheet(csv_filepath):
-    """
-    Import articles from a CSV file.
-    The CSV should have the columns: Article (title), Link (url), Category,
-    Publish Date, Update Date, and Type.
-    """
-    articles = []
-    try:
-        with open(csv_filepath, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                article = {
-                    "title": row.get("Article", "").strip(),
-                    "link": clean_url(row.get("Link", "").strip()),
-                    "category": row.get("Category", "").strip(),
-                    "publish_date": row.get("Publish Date", "").strip(),
-                    "update_date": row.get("Update Date", "").strip(),
-                    "type": row.get("Type", "").strip(),
-                    "translations": {}
-                }
-                articles.append(article)
-    except Exception as e:
-        print(f"❌ Error importing CSV data: {e}")
-    return articles
-
-def update_article(article):
-    """
-    Update a given article dict by scraping its page (to get description, etc.)
-    and then checking for translation availability.
-    CSV-imported metadata (e.g., category, update_date, type) will be preserved.
-    """
-    scraped = scrape_article(article.get("link"))
-    if scraped:
-        # Merge scraped data (CSV data will override if already present)
-        article["title"] = scraped.get("title", article.get("title", ""))
-        article["description"] = scraped.get("description", article.get("description", ""))
-        article["publish_date"] = scraped.get("publish_date", article.get("publish_date", ""))
-        # Use scraped last_edit_date or CSV's update_date (if present)
-        article["last_edit_date"] = scraped.get("last_edit_date", article.get("update_date", article.get("publish_date", "")))
-        article["link"] = scraped.get("link", article.get("link", ""))
-    article["translations"] = check_translations(article.get("link", ""))
-    return article
 
 # =======================
 # MAIN FUNCTION
 # =======================
-def run_academy_scraper():
-    print("\nLedger Academy Scraper Options:")
-    print("1. Scrape existing articles from academy_articles.json")
-    print("2. Crawl for new articles and add them")
-    print("3. Scrape new and existing articles (combine)")
-    print("4. Scrape targeted articles (enter URLs manually)")
-    print("5. Import articles from CSV file")
+def run_academy_keyword_scan():
+    print("🚀 Starting Academy Scraper & Keyword Scan...")
     
-    choice = input("Enter choice (1-5): ").strip()
-    articles = load_json(ARTICLES_FILE)
-    # Determine if articles is a list of URLs (strings) or dictionaries
-    articles_list = []
-    if articles:
-        if isinstance(articles[0], dict):
-            articles_list = articles
-        else:
-            articles_list = [{"link": url} for url in articles]
+    # **1️⃣ Offline Sync**
+    articles = load_and_sync_articles()
     
-    if choice == "1":
-        if not articles_list:
-            print("❌ No existing articles found in academy_articles.json.")
-            return
-        confirm = input("Scrape all articles in academy_articles.json? (Y/N): ").strip().lower()
-        if confirm != "y":
-            return
+    # **2️⃣ Web Scrape**
+    for idx, article in enumerate(articles):
+        print(f"🔎 Scraping Article {idx + 1}/{len(articles)}")
+        updated_article = scrape_article(article)
+        if updated_article:
+            articles[idx] = updated_article
 
-    elif choice == "2":
-        discovered = discover_articles()
-        new_articles = []
-        for url in discovered:
-            if not any(a.get("link") == url for a in articles_list):
-                new_articles.append({"link": url})
-        num_input = input("How many new articles? (Enter a number or 'all'): ").strip().lower()
-        if num_input != "all":
-            try:
-                limit = int(num_input)
-                new_articles = new_articles[:limit]
-            except ValueError:
-                print("Invalid number. Using all new articles.")
-        articles_list.extend(new_articles)
+    # **3️⃣ Save Results**
+    save_to_csv(articles)
+    with open(ARTICLES_FILE, "w") as f:
+        json.dump(articles, f, indent=4)
 
-    elif choice == "3":
-        discovered = discover_articles()
-        new_articles = []
-        for url in discovered:
-            if not any(a.get("link") == url for a in articles_list):
-                new_articles.append({"link": url})
-        num_input = input("How many additional new articles? (Enter a number or 'all'): ").strip().lower()
-        if num_input != "all":
-            try:
-                limit = int(num_input)
-                new_articles = new_articles[:limit]
-            except ValueError:
-                print("Invalid number. Using all new articles.")
-        articles_list.extend(new_articles)
-
-    elif choice == "4":
-        urls = input("Enter article URLs (comma-separated): ").strip().split(",")
-        new_urls = [clean_url(url) for url in urls if url.strip()]
-        for url in new_urls:
-            if not any(a.get("link") == url for a in articles_list):
-                articles_list.append({"link": url})
-
-    elif choice == "5":
-        # Automatically use the CSV file from the input folder
-        if not os.path.exists(CSV_IMPORT_FILE):
-            print(f"❌ CSV file not found at {CSV_IMPORT_FILE}. Please ensure it exists in the input folder.")
-            return
-        imported_articles = import_article_sheet(CSV_IMPORT_FILE)
-        if not imported_articles:
-            print("❌ No articles imported from CSV.")
-            return
-        
-        total_imported = len(imported_articles)
-        new_records = 0
-        for art in imported_articles:
-            exists = False
-            for existing in articles_list:
-                if existing.get("link") == art.get("link"):
-                    exists = True
-                    break
-            if not exists:
-                articles_list.append(art)
-                new_records += 1
-        save_json(articles_list, ARTICLES_FILE)
-        print(f"✅ Import complete: {new_records} new record(s) added out of {total_imported} total record(s) provided.")
-        return  # Exit without proceeding to full scrape
-
-    else:
-        print("❌ Invalid choice.")
-        return
-
-    # If not using import-only, continue with scraping process:
-    # Remove duplicates (based on the link)
-    unique_articles = []
-    seen = set()
-    for art in articles_list:
-        link = art.get("link")
-        if link and link not in seen:
-            seen.add(link)
-            unique_articles.append(art)
-    articles_list = unique_articles
-    save_json(articles_list, ARTICLES_FILE)
-
-    # Update each article (scrape details and check translations)
-    results = []
-    for art in articles_list:
-        updated = update_article(art)
-        results.append(updated)
-
-    save_to_csv(results)
-    print("✅ Scraping complete.")
-
-if __name__ == "__main__":
-    run_academy_scraper()
+    print("✅ Scan, Update, and Save complete.")

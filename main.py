@@ -7,8 +7,8 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "tools"))
 import google_search
 import youtube_search
-import reddit_search  # Keeping your import intact
-import academy_search  # New import for Ledger Academy scraper
+import reddit_search
+import academy_search  # Enhanced Ledger Academy Scraper
 
 # =======================
 # FILE PATHS
@@ -27,6 +27,9 @@ for directory in [DATA_DIR, OUTPUT_DIR, TOOLS_DIR]:
     if not os.path.exists(directory):
         os.makedirs(directory)
 
+# =======================
+# JSON HANDLERS
+# =======================
 def load_json(filepath):
     """Load JSON data from a file."""
     try:
@@ -48,7 +51,6 @@ def save_json(data, filepath):
 # =======================
 def prompt_google_search():
     """Handles Google Search interaction with enhanced keyword and website selection."""
-    # Load existing keywords and websites from file
     existing_keywords = load_json(KEYWORDS_FILE)
     existing_websites = load_json(WEBSITES_FILE)
     
@@ -102,39 +104,12 @@ def prompt_google_search():
         print("Invalid selection. Defaulting to using websites from websites.json.")
         websites = existing_websites.copy()
 
-    # Display the selected keywords and websites for confirmation
-    print("\nSelected Keywords:")
-    for kw in keywords:
-        print(f"- {kw}")
-    print("\nSelected Websites:")
-    for site in websites:
-        print(f"- {site}")
-
-    # Get the number of pages per keyword for the search
-    while True:
-        pages_input = input("Enter number of pages per keyword (1-5): ").strip()
-        try:
-            pages_per_keyword = int(pages_input)
-            if 1 <= pages_per_keyword <= 5:
-                break
-            else:
-                print("Please enter a number between 1 and 5.")
-        except ValueError:
-            print("Invalid number. Try again.")
-
-    confirm = input("Do you want to start the Google search? (Y/N): ").strip().lower()
-    if confirm == 'y':
-        print(f"\nStarting Google search with {len(keywords)} keyword(s), {len(websites)} website(s), {pages_per_keyword} page(s) per keyword...")
-        google_search.run_google_search(websites, keywords, pages_per_keyword)
+    print(f"\nStarting Google search with {len(keywords)} keywords and {len(websites)} websites...")
+    google_search.run_google_search(websites, keywords)
 
 # =======================
 # YOUTUBE SEARCH
 # =======================
-def extract_video_id(url_or_id):
-    """Extracts YouTube video ID from a URL or returns the ID if already formatted."""
-    match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url_or_id)
-    return match.group(1) if match else url_or_id
-
 def prompt_youtube_search():
     """Handles YouTube Search options for both videos and channels."""
     print("\n-- YouTube Search Options --")
@@ -143,102 +118,40 @@ def prompt_youtube_search():
     choice = input("Choose an option (1-2): ").strip()
 
     if choice == "1":
-        prompt_youtube_video_search()
+        youtube_search.prompt_youtube_video_search()
     elif choice == "2":
-        prompt_youtube_channel_search()
+        youtube_search.prompt_youtube_channel_search()
     else:
         print("Invalid choice. Please enter 1 or 2.")
 
-def prompt_youtube_video_search():
-    """Handles searching multiple YouTube videos for comments."""
-    print("\n-- YouTube Video Search Options --")
-    print("Provide a link to the video(s) you would like to search separated by a comma,")
-    print("or press 1 to search comments for the previously searched YouTube videos.")
+# =======================
+# LEDGER ACADEMY SEARCH
+# =======================
+def prompt_ledger_academy_search():
+    """Handles Ledger Academy Scraper"""
+    print("\n-- Ledger Academy Scraper Options --")
+    print("1. Offline Sync (CSV → JSON)")
+    print("2. Full Scrape (Web)")
+    print("3. Export to CSV")
+    print("4. Full Process (Sync, Scrape, and Export)")
 
-    video_list = load_json(YT_VIDEOS_FILE)
-    user_input = input("\nEnter video URLs or IDs (comma-separated), or press 1: ").strip()
-
-    if user_input == "1":
-        if not video_list:
-            print("No previously searched videos found.")
-            return
+    choice = input("Choose an option (1-4): ").strip()
+    
+    if choice == "1":
+        print("🔄 Running Offline Sync (CSV → JSON)...")
+        academy_search.load_and_sync_articles()
+    elif choice == "2":
+        print("🌐 Running Full Web Scrape...")
+        academy_search.run_academy_keyword_scan()
+    elif choice == "3":
+        print("💾 Exporting Data to CSV...")
+        articles = academy_search.load_and_sync_articles()
+        academy_search.save_to_csv(articles)
+    elif choice == "4":
+        print("🗂 Running Full Process (Sync, Scrape, Export)...")
+        academy_search.run_academy_keyword_scan()
     else:
-        new_videos = [extract_video_id(vid.strip()) for vid in user_input.split(",") if vid.strip()]
-        video_list.extend(new_videos)
-        save_choice = input("Would you like to add these videos to yt_videos.json? (Y/N): ").strip().lower()
-        if save_choice == 'y':
-            save_json(video_list, YT_VIDEOS_FILE)
-
-    search_all = input("Would you like to search all yt_videos.json as well? (Y/N): ").strip().lower()
-    if search_all == 'y':
-        video_list = load_json(YT_VIDEOS_FILE)
-
-    # Ask for comment search mode before confirming the search:
-    mode_choice = input(
-        "\nSelect comment search mode:\n"
-        "1 - Use keywords from keywords.json to filter comments\n"
-        "2 - Scrape all comments (raw mode)\n"
-        "Enter 1 or 2: "
-    ).strip()
-    if mode_choice == "2":
-        raw_mode = True
-    elif mode_choice == "1":
-        raw_mode = False
-    else:
-        print("Invalid mode selection, defaulting to keyword filtering.")
-        raw_mode = False
-
-    confirm = input("Do you want to start the YouTube video comment search? (Y/N): ").strip().lower()
-    if confirm == 'y':
-        # Load keywords (ignored if raw_mode is True)
-        keywords = load_json(KEYWORDS_FILE)
-        for vid in video_list:
-            youtube_search.run_youtube_search(vid, keywords, raw_mode)
-
-def prompt_youtube_channel_search():
-    """Handles searching multiple YouTube channels for comments."""
-    print("\n-- YouTube Channel Search Options --")
-    print("Provide a link to the channel(s) you would like to search separated by a comma,")
-    print("or press 1 to search comments for the previously searched YouTube channels.")
-
-    channel_list = load_json(YT_CHANNELS_FILE)
-    user_input = input("\nEnter channel URLs or IDs (comma-separated), or press 1: ").strip()
-
-    if user_input == "1":
-        if not channel_list:
-            print("No previously searched channels found.")
-            return
-    else:
-        new_channels = [ch.strip() for ch in user_input.split(",") if ch.strip()]
-        channel_list.extend(new_channels)
-        save_choice = input("Would you like to add these channels to yt_channels.json? (Y/N): ").strip().lower()
-        if save_choice == 'y':
-            save_json(channel_list, YT_CHANNELS_FILE)
-
-    search_all = input("Would you like to search all yt_channels.json as well? (Y/N): ").strip().lower()
-    if search_all == 'y':
-        channel_list = load_json(YT_CHANNELS_FILE)
-
-    # Ask for comment search mode before confirming the search:
-    mode_choice = input(
-        "\nSelect comment search mode:\n"
-        "1 - Use keywords from keywords.json to filter comments\n"
-        "2 - Scrape all comments (raw mode)\n"
-        "Enter 1 or 2: "
-    ).strip()
-    if mode_choice == "2":
-        raw_mode = True
-    elif mode_choice == "1":
-        raw_mode = False
-    else:
-        print("Invalid mode selection, defaulting to keyword filtering.")
-        raw_mode = False
-
-    confirm = input("Do you want to start the YouTube channel-wide comment search? (Y/N): ").strip().lower()
-    if confirm == 'y':
-        keywords = load_json(KEYWORDS_FILE)
-        for ch in channel_list:
-            youtube_search.run_channel_wide_search(ch, keywords, raw_mode)
+        print("Invalid choice. Please enter 1, 2, 3, or 4.")
 
 # =======================
 # MAIN MENU
@@ -261,7 +174,7 @@ def main():
         elif choice == "3":
             reddit_search.run_reddit_search()
         elif choice == "4":
-            academy_search.run_academy_scraper()  # Calls the updated Ledger Academy scraper
+            prompt_ledger_academy_search()
         elif choice == "5":
             print("Exiting program.")
             break

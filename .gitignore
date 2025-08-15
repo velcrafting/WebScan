@@ -5,3 +5,6 @@ config.py
 
 /input/*
 !/input/.gitkeep
+
+/output/*
+!/output/.gitkeep

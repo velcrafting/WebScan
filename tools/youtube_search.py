@@ -5,7 +5,7 @@ import time
 import googleapiclient.discovery
 import googleapiclient.errors
 from urllib.parse import urlparse, parse_qs
-import config  # Import API Key
+import config
 
 API_KEY = config.API_KEY
 
