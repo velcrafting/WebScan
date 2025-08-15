@@ -44,6 +44,7 @@
 │   ├── __init__.py
 │   ├── academy_search.py
 │   ├── academy_search_old.py
+│   ├── cli.py
 │   ├── google_search.py
 │   ├── index_tracker.py
 │   ├── llm_probe.py
@@ -55,4 +56,4 @@
 │   └── youtube_search.py
 └── tree.txt
 
-6 directories, 50 files
+6 directories, 51 files

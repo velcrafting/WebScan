@@ -1,185 +1,165 @@
-import json
-import re
 import os
 import sys
+import argparse
+from datetime import datetime
+import time
 
-# Import tools from the "tools" directory
+# Ensure tools directory is in path
 sys.path.append(os.path.join(os.path.dirname(__file__), "tools"))
-import google_search
-import youtube_search
-import reddit_search
-import academy_search  # Enhanced Ledger Academy Scraper
 
-# =======================
-# FILE PATHS
-# =======================
-DATA_DIR = 'data'
-OUTPUT_DIR = 'output'
-TOOLS_DIR = 'tools'
+from tools import cli, google_search, llm_probe, index_tracker, scheduler, storage, reddit_search, sentiment, themes
 
-KEYWORDS_FILE = os.path.join(DATA_DIR, 'keywords.json')
-WEBSITES_FILE = os.path.join(DATA_DIR, 'websites.json')
-YT_CHANNELS_FILE = os.path.join(DATA_DIR, 'yt_channels.json')
-YT_VIDEOS_FILE = os.path.join(DATA_DIR, 'yt_videos.json')
+# ---------------------------------------------------------------------------
+# GEO / SERP utilities
+# ---------------------------------------------------------------------------
+def run_geo_serp_reddit(queries_file: str, top: int):
+    queries = storage.load_json(queries_file, [])
+    all_results = []
+    for q in queries:
+        results = google_search.search_google(q)
+        reddit_hits = [r for r in results if "reddit.com" in r.get("url", "")] \
+            [:top]
+        for hit in reddit_hits:
+            hit["query"] = q
+            all_results.append(hit)
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
+    out_path = os.path.join('output', f'serp_reddit_{ts}.json')
+    storage.write_json(out_path, all_results)
+    print(f"Saved {len(all_results)} result(s) to {out_path}")
 
-# Ensure necessary directories exist
-for directory in [DATA_DIR, OUTPUT_DIR, TOOLS_DIR]:
-    if not os.path.exists(directory):
-        os.makedirs(directory)
+def run_geo_llm_probe(queries_file: str):
+    queries = storage.load_json(queries_file, [])
+    all_results = []
+    for q in queries:
+        all_results.extend(llm_probe.probe(q))
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
+    out_path = os.path.join('output', f'llm_probe_{ts}.json')
+    storage.write_json(out_path, all_results)
+    print(f"Saved {len(all_results)} probe result(s) to {out_path}")
 
-# =======================
-# JSON HANDLERS
-# =======================
-def load_json(filepath):
-    """Load JSON data from a file."""
-    try:
-        with open(filepath, 'r') as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def save_json(data, filepath):
-    """Save JSON data to a file."""
-    try:
-        with open(filepath, 'w') as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"Error saving {filepath}: {e}")
-
-# =======================
-# GOOGLE SEARCH
-# =======================
-def prompt_google_search():
-    """Handles Google Search interaction with enhanced keyword and website selection."""
-    existing_keywords = load_json(KEYWORDS_FILE)
-    existing_websites = load_json(WEBSITES_FILE)
-    
-    # --- KEYWORD SELECTION ---
-    print("\n--- Keyword Selection ---")
-    print("1. Use existing keywords from keywords.json")
-    print("2. Enter new keywords")
-    keyword_choice = input("Select keyword source (1 or 2): ").strip()
-    
-    if keyword_choice == "1":
-        keywords = existing_keywords.copy()
-    elif keyword_choice == "2":
-        new_keywords_input = input("Enter new keywords separated by comma: ").strip()
-        new_keywords = [kw.strip() for kw in new_keywords_input.split(",") if kw.strip()]
-        include_existing = input("Do you want to also search using keywords from keywords.json? (Y/N): ").strip().lower()
-        if include_existing == 'y':
-            keywords = list(set(existing_keywords + new_keywords))
-        else:
-            keywords = new_keywords
-
-        add_to_file = input("Do you want to add these new keywords to keywords.json for future use? (Y/N): ").strip().lower()
-        if add_to_file == 'y':
-            updated_keywords = list(set(existing_keywords + new_keywords))
-            save_json(updated_keywords, KEYWORDS_FILE)
+def run_geo_index_check():
+    stats = index_tracker.check_indexing()
+    if stats:
+        print("Indexing stats:", stats)
     else:
-        print("Invalid selection. Defaulting to using keywords from keywords.json.")
-        keywords = existing_keywords.copy()
+        print("No recent indexed posts found.")
 
-    # --- WEBSITE SELECTION ---
-    print("\n--- Website Selection ---")
-    print("1. Use existing websites from websites.json")
-    print("2. Enter new website URLs")
-    website_choice = input("Select website source (1 or 2): ").strip()
-    
-    if website_choice == "1":
-        websites = existing_websites.copy()
-    elif website_choice == "2":
-        new_websites_input = input("Enter new website URLs separated by comma: ").strip()
-        new_websites = [site.strip() for site in new_websites_input.split(",") if site.strip()]
-        include_existing_sites = input("Do you want to also search using websites from websites.json? (Y/N): ").strip().lower()
-        if include_existing_sites == 'y':
-            websites = list(set(existing_websites + new_websites))
-        else:
-            websites = new_websites
+# ---------------------------------------------------------------------------
+# Engagement utilities
+# ---------------------------------------------------------------------------
+def run_eng_brand_activity(users_file: str, lookback: int):
+    reddit = reddit_search.init_reddit_client()
+    users = storage.load_json(users_file, [])
+    end_ts = int(time.time())
+    start_ts = end_ts - lookback * 24 * 3600
+    rows = []
+    for user in users:
+        try:
+            redditor = reddit.redditor(user)
+            for c in redditor.comments.new(limit=None):
+                if c.created_utc < start_ts:
+                    break
+                rows.append({
+                    'user': user,
+                    'type': 'comment',
+                    'subreddit': c.subreddit.display_name,
+                    'score': c.score,
+                    'created_utc': datetime.utcfromtimestamp(c.created_utc).isoformat(),
+                })
+            for s in redditor.submissions.new(limit=None):
+                if s.created_utc < start_ts:
+                    break
+                rows.append({
+                    'user': user,
+                    'type': 'post',
+                    'subreddit': s.subreddit.display_name,
+                    'score': s.score,
+                    'created_utc': datetime.utcfromtimestamp(s.created_utc).isoformat(),
+                    'url': s.url,
+                })
+        except Exception as e:
+            rows.append({'user': user, 'error': str(e)})
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
+    out_path = os.path.join('output', f'brand_activity_{ts}.json')
+    storage.write_json(out_path, rows)
+    print(f"Saved activity for {len(users)} user(s) to {out_path}")
 
-        add_to_file_websites = input("Do you want to add these new websites to websites.json for future use? (Y/N): ").strip().lower()
-        if add_to_file_websites == 'y':
-            updated_websites = list(set(existing_websites + new_websites))
-            save_json(updated_websites, WEBSITES_FILE)
-    else:
-        print("Invalid selection. Defaulting to using websites from websites.json.")
-        websites = existing_websites.copy()
+def run_eng_fud_scan(subs_file: str, lookback: int, limit: int, rules_file: str):
+    reddit = reddit_search.init_reddit_client()
+    subreddits = storage.load_json(subs_file, [])
+    rules = themes.load_rules(rules_file) if os.path.exists(rules_file) else {}
+    start_ts = int(time.time()) - lookback * 24 * 3600
+    results = []
+    for sub in subreddits:
+        df = reddit_search.scrape_reddit(reddit, keywords=[], limit=limit, subreddit=sub, start_ts=start_ts,
+                                         highlight_terms=None, fetch_comments=False)
+        for row in df.to_dict('records'):
+            text = f"{row.get('title', '')} {row.get('content', '')}"
+            tone = sentiment.tone_from_text(text)
+            theme = themes.classify(text, rules) if rules else None
+            row.update({'tone': tone, 'theme': theme})
+            results.append(row)
+    ts = datetime.utcnow().strftime('%Y%m%d_%H%M')
+    out_path = os.path.join('output', f'fud_scan_{ts}.json')
+    storage.write_json(out_path, results)
+    print(f"Saved {len(results)} post(s) to {out_path}")
 
-    print(f"\nStarting Google search with {len(keywords)} keywords and {len(websites)} websites...")
-    google_search.run_google_search(websites, keywords)
+# ---------------------------------------------------------------------------
+# Scheduler
+# ---------------------------------------------------------------------------
+def run_scheduler():
+    scheduler.schedule_jobs()
 
-# =======================
-# YOUTUBE SEARCH
-# =======================
-def prompt_youtube_search():
-    """Handles YouTube Search options for both videos and channels."""
-    print("\n-- YouTube Search Options --")
-    print("1. Search comments for video(s)")
-    print("2. Search comments for entire channel(s)")
-    choice = input("Choose an option (1-2): ").strip()
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+def parse_args():
+    parser = argparse.ArgumentParser(description="WebScan CLI")
+    sub = parser.add_subparsers(dest='command')
 
-    if choice == "1":
-        youtube_search.prompt_youtube_video_search()
-    elif choice == "2":
-        youtube_search.prompt_youtube_channel_search()
-    else:
-        print("Invalid choice. Please enter 1 or 2.")
+    sp_serp = sub.add_parser('geo:serp-reddit', help='Collect Reddit results from Google SERP')
+    sp_serp.add_argument('--queries', required=True, help='Path to queries JSON file')
+    sp_serp.add_argument('--top', type=int, default=5, help='Top N reddit results to keep')
 
-# =======================
-# LEDGER ACADEMY SEARCH
-# =======================
-def prompt_ledger_academy_search():
-    """Handles Ledger Academy Scraper"""
-    print("\n-- Ledger Academy Scraper Options --")
-    print("1. Offline Sync (CSV → JSON)")
-    print("2. Full Scrape (Web)")
-    print("3. Export to CSV")
-    print("4. Full Process (Sync, Scrape, and Export)")
+    sp_probe = sub.add_parser('geo:llm-probe', help='Probe LLM providers for references')
+    sp_probe.add_argument('--queries', required=True, help='Path to queries JSON file')
 
-    choice = input("Choose an option (1-4): ").strip()
-    
-    if choice == "1":
-        print("🔄 Running Offline Sync (CSV → JSON)...")
-        academy_search.load_and_sync_articles()
-    elif choice == "2":
-        print("🌐 Running Full Web Scrape...")
-        academy_search.run_academy_keyword_scan()
-    elif choice == "3":
-        print("💾 Exporting Data to CSV...")
-        articles = academy_search.load_and_sync_articles()
-        academy_search.save_to_csv(articles)
-    elif choice == "4":
-        print("🗂 Running Full Process (Sync, Scrape, Export)...")
-        academy_search.run_academy_keyword_scan()
-    else:
-        print("Invalid choice. Please enter 1, 2, 3, or 4.")
+    sub.add_parser('geo:index-check', help='Check Google indexing for tracked Reddit posts')
 
-# =======================
-# MAIN MENU
-# =======================
+    sp_brand = sub.add_parser('eng:brand-activity', help='Collect recent activity for brand accounts')
+    sp_brand.add_argument('--users', required=True, help='Path to reddit usernames JSON file')
+    sp_brand.add_argument('--lookback', type=int, default=60, help='Lookback window in days')
+
+    sp_fud = sub.add_parser('eng:fud-scan', help='Scan subreddits for negative sentiment')
+    sp_fud.add_argument('--subreddits', required=True, help='Path to subreddits JSON file')
+    sp_fud.add_argument('--lookback', type=int, default=14, help='Lookback window in days')
+    sp_fud.add_argument('--limit', type=int, default=400, help='Posts to fetch per subreddit')
+    sp_fud.add_argument('--rules', default=os.path.join('data', 'theme_rules.json'), help='Path to theme rules JSON')
+
+    sub.add_parser('scheduler', help='Run scheduled jobs')
+
+    return parser.parse_args()
+
+
 def main():
-    """Main script loop for selecting search options."""
-    while True:
-        print("\n--- Search Options ---")
-        print("1. Google Search")
-        print("2. YouTube Comment Search")
-        print("3. Reddit Search")
-        print("4. Ledger Academy Scraper")
-        print("5. Exit")
-        choice = input("Choose an option (1-5): ").strip()
+    args = parse_args()
+    if not args.command:
+        cli.main_menu()
+        return
 
-        if choice == "1":
-            prompt_google_search()
-        elif choice == "2":
-            prompt_youtube_search()
-        elif choice == "3":
-            reddit_search.run_reddit_search()
-        elif choice == "4":
-            prompt_ledger_academy_search()
-        elif choice == "5":
-            print("Exiting program.")
-            break
-        else:
-            print("Invalid choice. Please enter 1-5.")
+    if args.command == 'geo:serp-reddit':
+        run_geo_serp_reddit(args.queries, args.top)
+    elif args.command == 'geo:llm-probe':
+        run_geo_llm_probe(args.queries)
+    elif args.command == 'geo:index-check':
+        run_geo_index_check()
+    elif args.command == 'eng:brand-activity':
+        run_eng_brand_activity(args.users, args.lookback)
+    elif args.command == 'eng:fud-scan':
+        run_eng_fud_scan(args.subreddits, args.lookback, args.limit, args.rules)
+    elif args.command == 'scheduler':
+        run_scheduler()
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     main()
