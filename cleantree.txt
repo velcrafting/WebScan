@@ -1,0 +1,59 @@
+.
+├── .gitignore
+├── cleantree.txt
+├── config.example.py
+├── config.py
+├── data
+│   ├── .gitkeep
+│   ├── GEO_queries.json
+│   ├── academy_articles.json
+│   ├── keywords.json
+│   ├── reddit_accounts.json
+│   ├── subreddits.json
+│   ├── theme_rules.json
+│   ├── websites.json
+│   ├── yt_channels.json
+│   └── yt_videos.json
+├── example_data
+│   ├── academy_articles.json
+│   ├── keywords.json
+│   ├── websites.json
+│   ├── yt_channels.json
+│   └── yt_videos.json
+├── input
+│   ├── .gitkeep
+│   └── academy_articles_import.csv
+├── main.py
+├── main_old.py
+├── output
+│   ├── .gitkeep
+│   ├── ledger_academy_articles_051225.csv
+│   ├── ledger_academy_articles_052125.csv
+│   ├── ledger_academy_articles_052225.csv
+│   ├── ledger_academy_articles_052725.csv
+│   ├── reddit_search_results_jul29.csv
+│   ├── reddit_search_results_mar26.csv
+│   ├── reddit_search_results_mar31.csv
+│   ├── reddit_search_summary_jul29.txt
+│   ├── reddit_search_summary_mar31.txt
+│   ├── youtube_all_comments_GOQNSZbwD40.csv
+│   └── youtube_all_comments_MeKrZW324zM.csv
+├── readme.md
+├── requirements.txt
+├── tools
+│   ├── __init__.py
+│   ├── academy_search.py
+│   ├── academy_search_old.py
+│   ├── cli.py
+│   ├── google_search.py
+│   ├── index_tracker.py
+│   ├── llm_probe.py
+│   ├── reddit_search.py
+│   ├── scheduler.py
+│   ├── sentiment.py
+│   ├── storage.py
+│   ├── themes.py
+│   └── youtube_search.py
+└── tree.txt
+
+6 directories, 51 files

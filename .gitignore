@@ -1,0 +1,13 @@
+config.py
+
+__pycache__/
+
+/data/*
+!/data/.gitkeep
+
+/input/*
+!/input/.gitkeep
+
+/output/*
+!/output/.gitkeep__pycache__/
+*.pyc
