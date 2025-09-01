@@ -1,6 +1,6 @@
 import os
 import re
-from . import google_search, youtube_search, reddit_search, academy_search, storage, geo
+from . import google_search, youtube_search, reddit_search, academy_search, storage, geo, helpcenter_search
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -235,9 +235,10 @@ def main_menu():
         print("2. YouTube Comment Search")
         print("3. Reddit Search")
         print("4. Ledger Academy Scraper")
-        print("5. GEO Report")
-        print("6. Exit")
-        choice = input("Choose an option (1-6): ").strip()
+        print("5. Help Center Scraper")
+        print("6. GEO Report")
+        print("7. Exit")
+        choice = input("Choose an option (1-7): ").strip()
 
         if choice == "1":
             prompt_google_search()
@@ -247,8 +248,28 @@ def main_menu():
             reddit_search.run_reddit_search()
         elif choice == "4":
             prompt_ledger_academy_search()
-            prompt_geo_report()
+        elif choice == "5":
+            # Help Center
+            print("\n-- Help Center Scraper --")
+            print("1. Offline Sync (CSV → JSON)")
+            print("2. Full Scrape (Web)")
+            print("3. Export to CSV")
+            print("4. Full Process (Sync, Scrape, Export)")
+            sub = input("Choose an option (1-4): ").strip()
+            if sub == "1":
+                helpcenter_search.load_and_sync_articles()
+            elif sub == "2":
+                helpcenter_search.run_helpcenter_scrape()
+            elif sub == "3":
+                articles = helpcenter_search.load_and_sync_articles()
+                helpcenter_search.save_to_csv(articles)
+            elif sub == "4":
+                helpcenter_search.run_helpcenter_scrape()
+            else:
+                print("Invalid choice. Please enter 1-4.")
         elif choice == "6":
+            prompt_geo_report()
+        elif choice == "7":
             print("Exiting program.")
             break
         else:
