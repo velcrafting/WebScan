@@ -80,6 +80,20 @@ def _extract_article_id(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def _normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("http"):
+        return url
+    if url.startswith("support.ledger.com"):
+        return f"https://{url}"
+    url = url.lstrip("/")
+    if url.startswith("article/"):
+        url = url[len("article/") :]
+    return f"https://support.ledger.com/article/{url}"
+
+
 def _zd_get_json(url: str, retries: int = 3):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     for attempt in range(retries):
@@ -140,7 +154,13 @@ def load_and_sync_articles():
     if os.path.exists(ARTICLES_FILE):
         with open(ARTICLES_FILE, "r", encoding="utf-8") as f:
             existing = json.load(f)
-    by_url = {a.get("url"): a for a in existing}
+    by_url = {}
+    for a in existing:
+        norm = _normalize_url(a.get("url"))
+        if not norm:
+            continue
+        a["url"] = norm
+        by_url[norm] = a
 
     added = 0
     if os.path.exists(CSV_IMPORT_FILE):
@@ -163,6 +183,7 @@ def load_and_sync_articles():
                         if isinstance(v, str) and v.startswith("http"):
                             url = v.strip()
                             break
+                url = _normalize_url(url)
                 title = (row.get("Title") or row.get("title") or "").strip()
                 if not url:
                     continue
