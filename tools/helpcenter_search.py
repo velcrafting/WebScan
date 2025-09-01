@@ -33,6 +33,10 @@ def log_failure(url, reason):
         f.write(f"{datetime.utcnow().isoformat()}\t{url}\t{reason}\n")
 
 
+def _safe_removesuffix(s: str, suf: str) -> str:
+    return s[:-len(suf)] if suf and s.endswith(suf) else s
+
+
 def fetch_page(url, retries=3):
     session = requests.Session()
     headers = {
@@ -50,14 +54,13 @@ def fetch_page(url, retries=3):
     }
     for attempt in range(retries):
         try:
-            resp = session.get(url, headers=headers, timeout=20)
+            resp = session.get(url, headers=headers, timeout=20, allow_redirects=True)
             if resp.status_code == 200:
                 return BeautifulSoup(resp.text, "html.parser")
             elif resp.status_code == 429:
                 wait = 2 ** attempt + uniform(0.5, 2.5)
                 time.sleep(wait)
             else:
-                # Some sites send 200 after redirect to locale. Try once more without path tweaks.
                 log_failure(url, f"HTTP {resp.status_code}")
                 break
         except Exception as e:
@@ -72,11 +75,12 @@ def fetch_page(url, retries=3):
 # Zendesk (Help Center) API helpers
 # =======================
 def _is_ledger_support(url: str) -> bool:
-    return "support.ledger.com" in url
+    return "support.ledger.com" in url or "ledger.zendesk.com" in url
 
 
 def _extract_article_id(url: str) -> str:
-    m = re.search(r"/article/(?:[^/]*?)(\d+)", url)
+    # Works for /article/115005165269-zd and /article/some-slug-115005165269-zd
+    m = re.search(r"/article/(?:[^/]*?)(\d+)", url or "")
     return m.group(1) if m else ""
 
 
@@ -84,28 +88,47 @@ def _normalize_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
         return ""
-    if url.startswith("http"):
+    if url.startswith("http://") or url.startswith("https://"):
         return url
     if url.startswith("support.ledger.com"):
         return f"https://{url}"
-    url = url.lstrip("/")
-    if url.startswith("article/"):
-        url = url[len("article/") :]
-    return f"https://support.ledger.com/article/{url}"
+    # Accept raw IDs like "115005165269-zd", slugs, or "article/<slug>"
+    u = url.lstrip("/")
+    if u.startswith("article/"):
+        u = u[len("article/"):]
+    return f"https://support.ledger.com/article/{u}"
 
 
 def _zd_get_json(url: str, retries: int = 3):
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Referer": "https://support.ledger.com/",
+    }
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=headers, timeout=20)
-            if r.status_code == 200:
-                return r.json()
-            elif r.status_code == 429:
+            r = requests.get(url, headers=headers, timeout=20, allow_redirects=True)
+            ct = r.headers.get("Content-Type", "")
+            if r.status_code == 200 and ("json" in ct.lower()):
+                try:
+                    return r.json()
+                except json.JSONDecodeError as e:
+                    log_failure(url, f"API non-JSON 200: {e}")
+                    time.sleep(2 ** attempt + uniform(0.25, 0.75))
+                    continue
+            if r.status_code == 429:
                 time.sleep(2 ** attempt + uniform(0.5, 1.5))
-            else:
-                log_failure(url, f"API HTTP {r.status_code}")
-                return None
+                continue
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location")
+                if loc:
+                    url = loc
+                    continue
+            log_failure(url, f"API HTTP {r.status_code} CT={ct}")
+            return None
         except Exception as e:
             if attempt == retries - 1:
                 log_failure(url, f"API exception: {e}")
@@ -113,22 +136,32 @@ def _zd_get_json(url: str, retries: int = 3):
     return None
 
 
-def _zd_article_by_id(host: str, article_id: str):
-    api = f"https://{host}/api/v2/help_center/articles/{article_id}.json"
-    return _zd_get_json(api)
+def _zd_article_by_id(article_id: str):
+    # Try both hosts for resiliency
+    for host in ("support.ledger.com", "ledger.zendesk.com"):
+        api = f"https://{host}/api/v2/help_center/articles/{article_id}.json"
+        data = _zd_get_json(api)
+        if data and data.get("article"):
+            return data
+    return None
 
 
-def _zd_search_article(host: str, query: str):
-    # Search by title words for best match
-    api = f"https://{host}/api/v2/help_center/articles/search.json?query={requests.utils.quote(query)}"
-    return _zd_get_json(api)
+def _zd_search_article(query: str, locale: str = "en-us"):
+    q = requests.utils.quote(query)
+    for host in ("support.ledger.com", "ledger.zendesk.com"):
+        api = f"https://{host}/api/v2/help_center/articles/search.json?query={q}&locale={locale}"
+        data = _zd_get_json(api)
+        if data and data.get("results"):
+            return data
+    return None
 
 
-def _zd_section_name(host: str, section_id: int) -> str:
-    api = f"https://{host}/api/v2/help_center/sections/{section_id}.json"
-    data = _zd_get_json(api)
-    if data and data.get("section"):
-        return data["section"].get("name", "")
+def _zd_section_name(section_id: int) -> str:
+    for host in ("support.ledger.com", "ledger.zendesk.com"):
+        api = f"https://{host}/api/v2/help_center/sections/{section_id}.json"
+        data = _zd_get_json(api)
+        if data and data.get("section"):
+            return data["section"].get("name", "")
     return ""
 
 
@@ -167,7 +200,6 @@ def load_and_sync_articles():
         with open(CSV_IMPORT_FILE, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                # Accept multiple possible column names; fall back to any value that looks like a URL
                 url = (
                     row.get("URL")
                     or row.get("Url")
@@ -178,7 +210,6 @@ def load_and_sync_articles():
                     or ""
                 ).strip()
                 if not url:
-                    # Find first value containing http(s)
                     for v in row.values():
                         if isinstance(v, str) and v.startswith("http"):
                             url = v.strip()
@@ -220,7 +251,6 @@ def _parse_json_ld_dates(soup):
             data = json.loads(tag.string or "{}")
         except Exception:
             continue
-        # Could be an object or a list
         items = data if isinstance(data, list) else [data]
         for it in items:
             if isinstance(it, dict) and it.get("@type") in {"Article", "NewsArticle", "TechArticle"}:
@@ -230,8 +260,6 @@ def _parse_json_ld_dates(soup):
 
 
 def _extract_topic(soup):
-    # Breadcrumbs often expose category/section on Zendesk
-    # Try several selectors
     selectors = [
         "nav[aria-label='breadcrumbs'] a",
         "ol.breadcrumbs a",
@@ -244,11 +272,8 @@ def _extract_topic(soup):
         if nodes:
             crumbs = [n.get_text(strip=True) for n in nodes]
             break
-    # Usually last is current page; take the second to last as topic/section
     if len(crumbs) >= 2:
         return crumbs[-2]
-
-    # Fallback: meta articleSection
     meta = soup.find("meta", attrs={"name": "article:section"})
     if meta and meta.get("content"):
         return meta["content"].strip()
@@ -259,7 +284,6 @@ def _extract_topic(soup):
 
 
 def _extract_summary(soup, max_paras=3):
-    # Common Zendesk containers for article body
     containers = [
         ".article-body",
         "article.article .article-content",
@@ -273,23 +297,18 @@ def _extract_summary(soup, max_paras=3):
         paras = [p.get_text(" ", strip=True) for p in node.find_all("p") if p.get_text(strip=True)]
         if paras:
             return " ".join(paras[:max_paras])
-    # Fallback: meta description
     meta_desc = soup.find("meta", attrs={"name": "description"})
     if meta_desc and meta_desc.get("content"):
         return meta_desc["content"].strip()
     meta_og_desc = soup.find("meta", attrs={"property": "og:description"})
     if meta_og_desc and meta_og_desc.get("content"):
         return meta_og_desc["content"].strip()
-
-    # Fallback: first paragraphs anywhere
     paras = [p.get_text(" ", strip=True) for p in soup.find_all("p") if p.get_text(strip=True)]
     return " ".join(paras[:max_paras])
 
 
 def _extract_dates(soup):
-    # JSON-LD first
     pub, mod = _parse_json_ld_dates(soup)
-    # Meta tags
     metas = [
         ("meta", {"property": "article:published_time"}),
         ("meta", {"name": "article:published_time"}),
@@ -312,18 +331,15 @@ def _extract_dates(soup):
         if el and el.get("content") and not mod:
             mod = el["content"].strip()
 
-    # time tags
     if not pub:
         t = soup.find("time", attrs={"datetime": True})
         if t:
             pub = t.get("datetime", "").strip()
 
-    # Normalize dates if possible
     def normalize(dt):
         if not dt:
             return ""
         dt = dt.strip()
-        # Try parsing ISO or RFC-like
         for fmt in (
             "%Y-%m-%dT%H:%M:%S%z",
             "%Y-%m-%dT%H:%M:%S.%f%z",
@@ -334,7 +350,6 @@ def _extract_dates(soup):
                 return datetime.strptime(dt, fmt).strftime("%Y-%m-%d")
             except Exception:
                 continue
-        # Last resort: regex extract date
         m = re.search(r"(\d{4}-\d{2}-\d{2})", dt)
         return m.group(1) if m else dt
 
@@ -350,76 +365,93 @@ def _count_keywords(text, keywords):
 # Scrape single article
 # =======================
 def scrape_article(article):
-    url = article.get("url") or article.get("link")
+    # Normalize at point of use, persist normalized form
+    url = _normalize_url(article.get("url") or article.get("link"))
     if not url:
         return article
+    article["url"] = url
+
     # Preferred path: Zendesk Help Center API for Ledger
     if _is_ledger_support(url):
-        host = "support.ledger.com"
         aid = _extract_article_id(url)
         data = None
         if aid:
-            data = _zd_article_by_id(host, aid)
+            data = _zd_article_by_id(aid)
         if not data or not data.get("article"):
-            # Fall back to search by title if available
-            q = article.get("title") or url.rsplit("/", 1)[-1].replace("-", " ")
-            res = _zd_search_article(host, q)
+            # Fall back to search by title or slug
+            q = (
+                article.get("title")
+                or _safe_removesuffix(url.rstrip("/").split("/")[-1], "-zd").replace("-", " ")
+            )
+            res = _zd_search_article(q)
             items = (res or {}).get("results", [])
-            # Choose the one whose html_url path matches best with given URL or title
             if items:
-                # Prefer exact html_url domain/path containing the slug or id
                 chosen = None
-                for it in items:
-                    if aid and str(it.get("id")) == str(aid):
-                        chosen = it
-                        break
-                    if url and it.get("html_url") and it["html_url"].split("/")[-1][:50] in url:
-                        chosen = it
-                        break
+                # Prefer exact ID match if we have one
+                if aid:
+                    for it in items:
+                        if str(it.get("id")) == str(aid):
+                            chosen = it
+                            break
                 if not chosen:
-                    chosen = items[0]
-                # Wrap into article-like structure
+                    needle = _safe_removesuffix(url.rstrip("/").split("/")[-1], "-zd")
+                    for it in items:
+                        slug = _safe_removesuffix(
+                            (it.get("html_url") or "").rstrip("/").split("/")[-1],
+                            "-zd",
+                        )
+                        if slug and (slug in needle or needle in slug):
+                            chosen = it
+                            break
+                chosen = chosen or items[0]
                 data = {"article": chosen}
+
         if data and data.get("article"):
             art = data["article"]
+
             # Title
             if not article.get("title"):
                 article["title"] = art.get("title", "")
+
             # Dates
             created = art.get("created_at") or art.get("updated_at") or ""
             updated = art.get("updated_at") or ""
             article["publish_date"] = created[:10] if created else article.get("publish_date", "")
             if updated:
                 article["updated"] = updated[:10]
+
             # Topic via section
             sec_id = art.get("section_id")
             if sec_id:
                 try:
-                    topic_name = _zd_section_name(host, int(sec_id))
+                    topic_name = _zd_section_name(int(sec_id))
                 except Exception:
                     topic_name = ""
                 if topic_name:
                     article["topic"] = topic_name
-            # Summary: from body (HTML) → first 2-3 sentences
+
+            # Summary from body
             body_html = art.get("body", "")
             if body_html:
                 body_text = BeautifulSoup(body_html, "html.parser").get_text(" ", strip=True)
-                # Split by sentences roughly
                 sentences = re.split(r"(?<=[.!?])\s+", body_text)
                 article["summary"] = " ".join(sentences[:3])[:1000]
+
             # Keywords
             keywords = load_keywords()
             if keywords and (art.get("body") or art.get("title")):
                 all_text = f"{art.get('title','')} {BeautifulSoup(art.get('body',''), 'html.parser').get_text(' ', strip=True)}"
                 article["keywords"] = _count_keywords(all_text, keywords)
+
             return article
+        else:
+            log_failure(url, "API path failed; falling back to HTML scrape")
 
     # Fallback: HTML scraping
     soup = fetch_page(url)
     if not soup:
         return article
 
-    # Title fallback
     if not article.get("title"):
         h1 = soup.find("h1")
         if h1:
@@ -438,7 +470,6 @@ def scrape_article(article):
     summary = _extract_summary(soup)
     article["summary"] = summary
 
-    # Keywords
     keywords = load_keywords()
     if keywords:
         all_text = soup.get_text(" ", strip=True)
@@ -475,15 +506,27 @@ def run_helpcenter_scrape():
     articles = load_and_sync_articles()
     if not articles:
         print("⚠️ No articles found to scrape. Ensure CSV has rows and correct headers (Title, URL).")
-        # Still write empty CSV with header for transparency
         save_to_csv([])
         return
+
     for i, a in enumerate(articles, 1):
-        print(f"Scraping {i}/{len(articles)}: {a.get('url')}")
+        # Normalize and guard
+        a["url"] = _normalize_url(a.get("url") or a.get("link"))
+        if not a["url"].startswith("http"):
+            log_failure(a.get("url") or "", "Refusing to fetch non-HTTP URL after normalization")
+            print(f"⚠️ Skipping {i}: not a valid URL after normalization → {a['url']!r}")
+            continue
+
+        print(f"Scraping {i}/{len(articles)}: {a['url']}")
         updated = scrape_article(a)
-        articles[i-1] = updated
-    # Persist
+        articles[i - 1] = updated
+
     with open(ARTICLES_FILE, "w", encoding="utf-8") as f:
         json.dump(articles, f, indent=2, ensure_ascii=False)
+
     save_to_csv(articles)
     print("✅ Help Center scrape complete")
+
+
+if __name__ == "__main__":
+    run_helpcenter_scrape()
